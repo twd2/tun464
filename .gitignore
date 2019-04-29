@@ -1,2 +1,3 @@
 config.mk
 tun464
+*.o

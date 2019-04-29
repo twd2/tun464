@@ -3,8 +3,11 @@ include config.mk
 .PHONY: all
 all: tun464
 
-tun464: main.c
+tun464: main.o common.o utils.o 4to6.o 6to4.o
 	gcc -O2 -Wall $^ -o $@
+
+%.o: %.c common.h utils.h 4to6.h 6to4.h
+	gcc -O2 -Wall -c $< -o $@
 
 .PHONY: run
 run: tun464
@@ -30,4 +33,4 @@ setup2:
 
 .PHONY: clean
 clean:
-	-rm tun464
+	-rm tun464 *.o
