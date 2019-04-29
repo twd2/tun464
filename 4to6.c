@@ -46,11 +46,10 @@ ssize_t v4_to_v6(ipv6_header_t *v6pkt, size_t v6len, const ipv4_header_t *v4pkt,
         printf("  This is an ICMP packet.\n");
 #endif
         int only_header = copy_len != payload_len || copy_len == sizeof(icmpv6_header_t);
-        int ret = icmpv4_to_icmpv6((icmpv6_header_t *)(v6pkt + 1), v6len - sizeof(ipv6_header_t),
-                                   (icmpv4_header_t *)((uint8_t *)v4pkt + v4header_len),
-                                   v4len - v4header_len,
-                                   v6pkt->src_bytes, v6pkt->dst_bytes,
-                                   payload_len, only_header);
+        int ret = v4_to_v6_icmp((icmpv6_header_t *)(v6pkt + 1), v6len - sizeof(ipv6_header_t),
+                                (icmpv4_header_t *)((uint8_t *)v4pkt + v4header_len),
+                                v4len - v4header_len, v6pkt->src_bytes, v6pkt->dst_bytes,
+                                payload_len, only_header);
         if (ret <= 0) return ret;
         copy_len = ret;
         if (!only_header)
@@ -60,6 +59,30 @@ ssize_t v4_to_v6(ipv6_header_t *v6pkt, size_t v6len, const ipv4_header_t *v4pkt,
         }
         v6pkt->next_header = IPV6_NEXT_HEADER_ICMP;
     }
+#ifdef TRANSLATE_UDP
+    else if (copy_len >= sizeof(udp_header_t) && v4pkt->next_header == IP_NEXT_HEADER_UDP)
+    {
+        // Copy the payload.
+        memcpy(v6pkt + 1, (uint8_t *)v4pkt + v4header_len, copy_len);
+        // Adjust the UDP header.
+        v4_to_v6_udp_header((udp_header_t *)(v6pkt + 1),
+                            (udp_header_t *)((uint8_t *)v4pkt + v4header_len),
+                            v4pkt->src_bytes, v4pkt->dst_bytes,
+                            v6pkt->src_bytes, v6pkt->dst_bytes);
+    }
+#endif
+#ifdef TRANSLATE_TCP
+    else if (copy_len >= sizeof(tcp_header_t) && v4pkt->next_header == IP_NEXT_HEADER_TCP)
+    {
+        // Copy the payload.
+        memcpy(v6pkt + 1, (uint8_t *)v4pkt + v4header_len, copy_len);
+        // Adjust the TCP header.
+        v4_to_v6_tcp_header((tcp_header_t *)(v6pkt + 1),
+                            (tcp_header_t *)((uint8_t *)v4pkt + v4header_len),
+                            v4pkt->src_bytes, v4pkt->dst_bytes,
+                            v6pkt->src_bytes, v6pkt->dst_bytes);
+    }
+#endif
     else
     {
         // Just copy the payload.
@@ -69,7 +92,7 @@ ssize_t v4_to_v6(ipv6_header_t *v6pkt, size_t v6len, const ipv4_header_t *v4pkt,
     return sizeof(ipv6_header_t) + copy_len;
 }
 
-static inline int icmpv4_to_icmpv6_type_code(uint16_t type_code)
+static inline int v4_to_v6_icmp_type_code(uint16_t type_code)
 {
 #define DO_TYPE_CODE(name) \
 case ICMPV4_TYPE_CODE_##name: \
@@ -86,9 +109,9 @@ case ICMPV4_TYPE_CODE_##name: \
 #undef DO_TYPE_CODE
 }
 
-static inline ssize_t icmpv4_to_icmpv6_ip_payload(icmpv6_header_t *v6pkt, size_t v6len,
-                                                  const icmpv4_header_t *v4pkt, size_t v4len,
-                                                  const uint8_t *src_bytes, const uint8_t *dst_bytes)
+static inline ssize_t v4_to_v6_icmp_ip_payload(icmpv6_header_t *v6pkt, size_t v6len,
+                                               const icmpv4_header_t *v4pkt, size_t v4len,
+                                               const uint8_t *src_bytes, const uint8_t *dst_bytes)
 {
     int ret;
     if ((ret = v4_to_v6((ipv6_header_t *)(v6pkt + 1), v6len - sizeof(icmpv6_header_t),
@@ -105,10 +128,10 @@ static inline ssize_t icmpv4_to_icmpv6_ip_payload(icmpv6_header_t *v6pkt, size_t
     return len;
 }
 
-static inline ssize_t icmpv4_to_icmpv6_data_payload(icmpv6_header_t *v6pkt, size_t v6len,
-                                                    const icmpv4_header_t *v4pkt, size_t v4len,
-                                                    const uint8_t *src_bytes, const uint8_t *dst_bytes,
-                                                    uint16_t payload_len, int only_header)
+static inline ssize_t v4_to_v6_icmp_data_payload(icmpv6_header_t *v6pkt, size_t v6len,
+                                                 const icmpv4_header_t *v4pkt, size_t v4len,
+                                                 const uint8_t *src_bytes, const uint8_t *dst_bytes,
+                                                 uint16_t payload_len, int only_header)
 {
     if (!only_header)
     {
@@ -138,14 +161,14 @@ static inline ssize_t icmpv4_to_icmpv6_data_payload(icmpv6_header_t *v6pkt, size
     }
 }
 
-ssize_t icmpv4_to_icmpv6(icmpv6_header_t *v6pkt, size_t v6len,
-                         const icmpv4_header_t *v4pkt, size_t v4len,
-                         const uint8_t *src_bytes, const uint8_t *dst_bytes,
-                         uint16_t payload_len, int only_header)
+ssize_t v4_to_v6_icmp(icmpv6_header_t *v6pkt, size_t v6len,
+                      const icmpv4_header_t *v4pkt, size_t v4len,
+                      const uint8_t *src_bytes, const uint8_t *dst_bytes,
+                      uint16_t payload_len, int only_header)
 {
     if (v4len < sizeof(icmpv4_header_t)) return -14;
     if (v6len < sizeof(icmpv6_header_t)) return -15;
-    int new_type_code = icmpv4_to_icmpv6_type_code(v4pkt->type_code);
+    int new_type_code = v4_to_v6_icmp_type_code(v4pkt->type_code);
     if (new_type_code >= 0)
     {
 #ifdef VERBOSE
@@ -155,7 +178,7 @@ ssize_t icmpv4_to_icmpv6(icmpv6_header_t *v6pkt, size_t v6len,
         v6pkt->type_code = new_type_code & 0xffff;
         v6pkt->checksum = 0;
         v6pkt->rest = 0;
-        return icmpv4_to_icmpv6_ip_payload(v6pkt, v6len, v4pkt, v4len, src_bytes, dst_bytes);
+        return v4_to_v6_icmp_ip_payload(v6pkt, v6len, v4pkt, v4len, src_bytes, dst_bytes);
     }
     if (v4pkt->type_code == ICMPV4_TYPE_CODE_TOO_BIG)
     {
@@ -167,7 +190,7 @@ ssize_t icmpv4_to_icmpv6(icmpv6_header_t *v6pkt, size_t v6len,
         v6pkt->ununsed1 = 0;
         // Adjust MTU overhead.
         v6pkt->mtu = htons(ntohs(v4pkt->mtu) - sizeof(ipv4_header_t) + sizeof(ipv6_header_t));
-        return icmpv4_to_icmpv6_ip_payload(v6pkt, v6len, v4pkt, v4len, src_bytes, dst_bytes);
+        return v4_to_v6_icmp_ip_payload(v6pkt, v6len, v4pkt, v4len, src_bytes, dst_bytes);
     }
     if (v4pkt->type_code == ICMPV4_TYPE_CODE_ECHO_REQUEST)
     {
@@ -178,8 +201,8 @@ ssize_t icmpv4_to_icmpv6(icmpv6_header_t *v6pkt, size_t v6len,
         v6pkt->checksum = 0;
         v6pkt->id = v4pkt->id;
         v6pkt->seq = v4pkt->seq;
-        return icmpv4_to_icmpv6_data_payload(v6pkt, v6len, v4pkt, v4len,
-                                             src_bytes, dst_bytes, payload_len, only_header);
+        return v4_to_v6_icmp_data_payload(v6pkt, v6len, v4pkt, v4len, src_bytes, dst_bytes,
+                                          payload_len, only_header);
     }
     if (v4pkt->type_code == ICMPV4_TYPE_CODE_ECHO_REPLY)
     {
@@ -190,11 +213,33 @@ ssize_t icmpv4_to_icmpv6(icmpv6_header_t *v6pkt, size_t v6len,
         v6pkt->checksum = 0;
         v6pkt->id = v4pkt->id;
         v6pkt->seq = v4pkt->seq;
-        return icmpv4_to_icmpv6_data_payload(v6pkt, v6len, v4pkt, v4len,
-                                             src_bytes, dst_bytes, payload_len, only_header);
+        return v4_to_v6_icmp_data_payload(v6pkt, v6len, v4pkt, v4len, src_bytes, dst_bytes,
+                                          payload_len, only_header);
     }
 #if defined(VERBOSE) || defined(LOG_ERROR)
     printf("Unknown ICMP type %d code %d.\n", v4pkt->type, v4pkt->code);
 #endif
     return -16;
+}
+
+void v4_to_v6_udp_header(udp_header_t *v6pkt, const udp_header_t *v4pkt,
+                         const uint8_t *v4src_bytes, const uint8_t *v4dst_bytes,
+                         const uint8_t *v6src_bytes, const uint8_t *v6dst_bytes)
+{
+    // Incrementally update the checksum.
+    uint32_t checksum = ntohs(~v4pkt->checksum);
+    checksum += ip_checksum_neg_partial(v4src_bytes, 4) + ip_checksum_neg_partial(v4dst_bytes, 4);
+    checksum += ip_checksum_partial(v6src_bytes, 16) + ip_checksum_partial(v6dst_bytes, 16);
+    v6pkt->checksum = ip_checksum_final(checksum);
+}
+
+void v4_to_v6_tcp_header(tcp_header_t *v6pkt, const tcp_header_t *v4pkt,
+                         const uint8_t *v4src_bytes, const uint8_t *v4dst_bytes,
+                         const uint8_t *v6src_bytes, const uint8_t *v6dst_bytes)
+{
+    // Incrementally update the checksum.
+    uint32_t checksum = ntohs(~v4pkt->checksum);
+    checksum += ip_checksum_neg_partial(v4src_bytes, 4) + ip_checksum_neg_partial(v4dst_bytes, 4);
+    checksum += ip_checksum_partial(v6src_bytes, 16) + ip_checksum_partial(v6dst_bytes, 16);
+    v6pkt->checksum = ip_checksum_final(checksum);
 }

@@ -5,8 +5,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define VERBOSE
+// #define VERBOSE
 #define LOG_ERROR
+#define TRANSLATE_UDP
+#define TRANSLATE_TCP
 
 #define UNUSED(x) ((void)(x))
 
@@ -22,6 +24,8 @@
 #define IPV4_DF_BIT 0x4000
 #define IPV4_NEXT_HEADER_ICMP 1
 #define IPV6_NEXT_HEADER_ICMP 58
+#define IP_NEXT_HEADER_UDP 17
+#define IP_NEXT_HEADER_TCP 6
 
 #define ICMPV4_TYPE_TTL 0x0b
 #define ICMPV4_CODE_TTL 0x00
@@ -185,6 +189,21 @@ typedef struct
         };
     };
 } __attribute__((packed)) icmpv6_header_t;
+
+typedef struct
+{
+    uint16_t src_port;
+    uint16_t dst_port;
+    uint16_t len;
+    uint16_t checksum;
+} __attribute__((packed)) udp_header_t;
+
+typedef struct
+{
+    uint32_t header0[4];
+    uint16_t checksum;
+    uint16_t header1;
+} __attribute__((packed)) tcp_header_t;
 
 extern uint8_t local_prefix[16];
 extern uint8_t remote_prefix[16];

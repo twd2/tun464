@@ -59,10 +59,9 @@ ssize_t v6_to_v4(ipv4_header_t *v4pkt, size_t v4len, const ipv6_header_t *v6pkt,
         printf("  This is an ICMP packet.\n");
 #endif
         int only_header = copy_len != payload_len;
-        int ret = icmpv6_to_icmpv4((icmpv4_header_t *)(v4pkt + 1), v4len - sizeof(ipv4_header_t),
-                                   (icmpv6_header_t *)(v6pkt + 1), v6len - sizeof(ipv6_header_t),
-                                   v6pkt->src_bytes, v6pkt->dst_bytes,
-                                   payload_len, only_header);
+        int ret = v6_to_v4_icmp((icmpv4_header_t *)(v4pkt + 1), v4len - sizeof(ipv4_header_t),
+                                (icmpv6_header_t *)(v6pkt + 1), v6len - sizeof(ipv6_header_t),
+                                v6pkt->src_bytes, v6pkt->dst_bytes, payload_len, only_header);
         if (ret <= 0) return ret;
         copy_len = ret;
         if (!only_header)
@@ -72,6 +71,28 @@ ssize_t v6_to_v4(ipv4_header_t *v4pkt, size_t v4len, const ipv6_header_t *v6pkt,
         }
         v4pkt->next_header = IPV4_NEXT_HEADER_ICMP;
     }
+#ifdef TRANSLATE_UDP
+    else if (copy_len >= sizeof(udp_header_t) && v6pkt->next_header == IP_NEXT_HEADER_UDP)
+    {
+        // Copy the payload.
+        memcpy(v4pkt + 1, v6pkt + 1, copy_len);
+        // Adjust the UDP header.
+        v6_to_v4_udp_header((udp_header_t *)(v4pkt + 1), (udp_header_t *)(v6pkt + 1),
+                            v6pkt->src_bytes, v6pkt->dst_bytes,
+                            v4pkt->src_bytes, v4pkt->dst_bytes);
+    }
+#endif
+#ifdef TRANSLATE_TCP
+    else if (copy_len >= sizeof(tcp_header_t) && v6pkt->next_header == IP_NEXT_HEADER_TCP)
+    {
+        // Copy the payload.
+        memcpy(v4pkt + 1, v6pkt + 1, copy_len);
+        // Adjust the TCP header.
+        v6_to_v4_tcp_header((tcp_header_t *)(v4pkt + 1), (tcp_header_t *)(v6pkt + 1),
+                            v6pkt->src_bytes, v6pkt->dst_bytes,
+                            v4pkt->src_bytes, v4pkt->dst_bytes);
+    }
+#endif
     else
     {
         // Just copy the payload.
@@ -83,7 +104,7 @@ ssize_t v6_to_v4(ipv4_header_t *v4pkt, size_t v4len, const ipv6_header_t *v6pkt,
     return sizeof(ipv4_header_t) + copy_len;
 }
 
-static inline int icmpv6_to_icmpv4_type_code(uint16_t type_code)
+static inline int v6_to_v4_icmp_type_code(uint16_t type_code)
 {
 #define DO_TYPE_CODE(name) \
 case ICMPV6_TYPE_CODE_##name: \
@@ -100,8 +121,8 @@ case ICMPV6_TYPE_CODE_##name: \
 #undef DO_TYPE_CODE
 }
 
-static inline ssize_t icmpv6_to_icmpv4_ip_payload(icmpv4_header_t *v4pkt, size_t v4len,
-                                                  const icmpv6_header_t *v6pkt, size_t v6len)
+static inline ssize_t v6_to_v4_icmp_ip_payload(icmpv4_header_t *v4pkt, size_t v4len,
+                                               const icmpv6_header_t *v6pkt, size_t v6len)
 {
     int ret;
     if ((ret = v6_to_v4((ipv4_header_t *)(v4pkt + 1), v4len - sizeof(icmpv4_header_t),
@@ -114,10 +135,10 @@ static inline ssize_t icmpv6_to_icmpv4_ip_payload(icmpv4_header_t *v4pkt, size_t
     return len;
 }
 
-static inline ssize_t icmpv6_to_icmpv4_data_payload(icmpv4_header_t *v4pkt, size_t v4len,
-                                                    const icmpv6_header_t *v6pkt, size_t v6len,
-                                                    const uint8_t *src_bytes, const uint8_t *dst_bytes,
-                                                    uint16_t payload_len, int only_header)
+static inline ssize_t v6_to_v4_icmp_data_payload(icmpv4_header_t *v4pkt, size_t v4len,
+                                                 const icmpv6_header_t *v6pkt, size_t v6len,
+                                                 const uint8_t *src_bytes, const uint8_t *dst_bytes,
+                                                 uint16_t payload_len, int only_header)
 {
     if (!only_header)
     {
@@ -147,14 +168,14 @@ static inline ssize_t icmpv6_to_icmpv4_data_payload(icmpv4_header_t *v4pkt, size
     }
 }
 
-ssize_t icmpv6_to_icmpv4(icmpv4_header_t *v4pkt, size_t v4len,
-                         const icmpv6_header_t *v6pkt, size_t v6len,
-                         const uint8_t *src_bytes, const uint8_t *dst_bytes,
-                         uint16_t payload_len, int only_header)
+ssize_t v6_to_v4_icmp(icmpv4_header_t *v4pkt, size_t v4len,
+                      const icmpv6_header_t *v6pkt, size_t v6len,
+                      const uint8_t *src_bytes, const uint8_t *dst_bytes,
+                      uint16_t payload_len, int only_header)
 {
     if (v6len < sizeof(icmpv6_header_t)) return -10;
     if (v4len < sizeof(icmpv4_header_t)) return -11;
-    int new_type_code = icmpv6_to_icmpv4_type_code(v6pkt->type_code);
+    int new_type_code = v6_to_v4_icmp_type_code(v6pkt->type_code);
     if (new_type_code >= 0)
     {
 #ifdef VERBOSE
@@ -164,7 +185,7 @@ ssize_t icmpv6_to_icmpv4(icmpv4_header_t *v4pkt, size_t v4len,
         v4pkt->type_code = new_type_code & 0xffff;
         v4pkt->checksum = 0;
         v4pkt->rest = 0;
-        return icmpv6_to_icmpv4_ip_payload(v4pkt, v4len, v6pkt, v6len);
+        return v6_to_v4_icmp_ip_payload(v4pkt, v4len, v6pkt, v6len);
     }
     if (v6pkt->type_code == ICMPV6_TYPE_CODE_TOO_BIG)
     {
@@ -176,7 +197,7 @@ ssize_t icmpv6_to_icmpv4(icmpv4_header_t *v4pkt, size_t v4len,
         v4pkt->ununsed1 = 0;
         // Adjust MTU overhead.
         v4pkt->mtu = htons(ntohs(v6pkt->mtu) - sizeof(ipv6_header_t) + sizeof(ipv4_header_t));
-        return icmpv6_to_icmpv4_ip_payload(v4pkt, v4len, v6pkt, v6len);
+        return v6_to_v4_icmp_ip_payload(v4pkt, v4len, v6pkt, v6len);
     }
     if (v6pkt->type_code == ICMPV6_TYPE_CODE_ECHO_REQUEST)
     {
@@ -187,8 +208,8 @@ ssize_t icmpv6_to_icmpv4(icmpv4_header_t *v4pkt, size_t v4len,
         v4pkt->checksum = 0;
         v4pkt->id = v6pkt->id;
         v4pkt->seq = v6pkt->seq;
-        return icmpv6_to_icmpv4_data_payload(v4pkt, v4len, v6pkt, v6len,
-                                             src_bytes, dst_bytes, payload_len, only_header);
+        return v6_to_v4_icmp_data_payload(v4pkt, v4len, v6pkt, v6len, src_bytes, dst_bytes,
+                                          payload_len, only_header);
     }
     if (v6pkt->type_code == ICMPV6_TYPE_CODE_ECHO_REPLY)
     {
@@ -199,8 +220,8 @@ ssize_t icmpv6_to_icmpv4(icmpv4_header_t *v4pkt, size_t v4len,
         v4pkt->checksum = 0;
         v4pkt->id = v6pkt->id;
         v4pkt->seq = v6pkt->seq;
-        return icmpv6_to_icmpv4_data_payload(v4pkt, v4len, v6pkt, v6len,
-                                             src_bytes, dst_bytes, payload_len, only_header);
+        return v6_to_v4_icmp_data_payload(v4pkt, v4len, v6pkt, v6len, src_bytes, dst_bytes,
+                                          payload_len, only_header);
     }
 #if defined(VERBOSE) || defined(LOG_ERROR)
     printf("Unknown ICMP type %d code %d.\n", v6pkt->type, v6pkt->code);
@@ -208,3 +229,24 @@ ssize_t icmpv6_to_icmpv4(icmpv4_header_t *v4pkt, size_t v4len,
     return -12;
 }
 
+void v6_to_v4_udp_header(udp_header_t *v4pkt, const udp_header_t *v6pkt,
+                         const uint8_t *v6src_bytes, const uint8_t *v6dst_bytes,
+                         const uint8_t *v4src_bytes, const uint8_t *v4dst_bytes)
+{
+    // Incrementally update the checksum.
+    uint32_t checksum = ntohs(~v6pkt->checksum);
+    checksum += ip_checksum_neg_partial(v6src_bytes, 16) + ip_checksum_neg_partial(v6dst_bytes, 16);
+    checksum += ip_checksum_partial(v4src_bytes, 4) + ip_checksum_partial(v4dst_bytes, 4);
+    v4pkt->checksum = ip_checksum_final(checksum);
+}
+
+void v6_to_v4_tcp_header(tcp_header_t *v4pkt, const tcp_header_t *v6pkt,
+                         const uint8_t *v6src_bytes, const uint8_t *v6dst_bytes,
+                         const uint8_t *v4src_bytes, const uint8_t *v4dst_bytes)
+{
+    // Incrementally update the checksum.
+    uint32_t checksum = ntohs(~v6pkt->checksum);
+    checksum += ip_checksum_neg_partial(v6src_bytes, 16) + ip_checksum_neg_partial(v6dst_bytes, 16);
+    checksum += ip_checksum_partial(v4src_bytes, 4) + ip_checksum_partial(v4dst_bytes, 4);
+    v4pkt->checksum = ip_checksum_final(checksum);
+}
