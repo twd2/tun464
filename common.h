@@ -22,8 +22,11 @@
 #define REMOTE_PREFIX "2001:db8:2:4646::"  // /96
 
 #define IPV4_DF_BIT 0x4000
+#define IPV4_MF_BIT 0x2000
 #define IPV4_NEXT_HEADER_ICMP 1
+#define IPV6_MF_BIT 0x0001
 #define IPV6_NEXT_HEADER_ICMP 58
+#define IPV6_NEXT_HEADER_FRAGMENT 44
 #define IP_NEXT_HEADER_UDP 17
 #define IP_NEXT_HEADER_TCP 6
 
@@ -189,6 +192,14 @@ typedef struct
         };
     };
 } __attribute__((packed)) icmpv6_header_t;
+
+typedef struct
+{
+    uint8_t next_header;
+    uint8_t resevrved1;
+    uint16_t offset_mf;
+    uint32_t id;
+} __attribute__((packed)) ipv6_fragment_header_t;
 
 typedef struct
 {

@@ -19,10 +19,26 @@ ssize_t v4_to_v6(ipv6_header_t *v6pkt, size_t v6len, const ipv4_header_t *v4pkt,
     if (v4len < v4header_len + copy_len) return -3;
     if (v6len < sizeof(ipv6_header_t) + copy_len) return -4;
 
+    const void *v4payload = (const uint8_t *)v4pkt + v4header_len;
+    size_t v4payload_len = v4len - v4header_len;
+    void *v6payload = v6pkt + 1;
+    size_t v6payload_len = v6len - sizeof(ipv6_header_t);
+
+    // Check fragmentation.
+    size_t fragment_offset = ntohs(v4pkt->flags) & 0x1fff;
+    uint32_t fragment_mf = ntohs(v4pkt->flags) & IPV4_MF_BIT;
+    size_t fragment_header_len = 0;
+    int is_fragment = fragment_mf || (fragment_offset != 0);
+    if (is_fragment)
+    {
+        if (v6len < sizeof(ipv6_header_t) + sizeof(ipv6_fragment_header_t) + copy_len) return -400;
+        fragment_header_len = sizeof(ipv6_fragment_header_t);
+    }
+
     // Translate the header.
     v6pkt->version_flow = htonl(0x60000000);
-    v6pkt->payload_len = htons(payload_len);
-    v6pkt->next_header = v4pkt->next_header;
+    v6pkt->payload_len = htons(fragment_header_len + payload_len);
+    v6pkt->next_header = is_fragment ? IPV6_NEXT_HEADER_FRAGMENT : v4pkt->next_header;
     v6pkt->hop_limit = v4pkt->hop_limit;
 
     // Translate addresses.
@@ -37,8 +53,21 @@ ssize_t v4_to_v6(ipv6_header_t *v6pkt, size_t v6len, const ipv4_header_t *v4pkt,
     memcpy(v6pkt->dst_bytes, dst_prefix, PREFIX_BYTES);
     memcpy(v6pkt->dst_bytes + PREFIX_BYTES, v4pkt->dst_bytes, HOST_BYTES);
 
+    // Handle fragmentation.
+    if (is_fragment)
+    {
+        ipv6_fragment_header_t *frag_header = (ipv6_fragment_header_t *)v6payload;
+        v6payload = frag_header + 1;
+        v6payload_len -= sizeof(ipv6_fragment_header_t);
+        frag_header->next_header = v4pkt->next_header;
+        frag_header->resevrved1 = 0;
+        frag_header->offset_mf = htons((fragment_offset << 3) | (fragment_mf >> 13));
+        frag_header->id = htonl(ntohs(v4pkt->id));
+    }
+
     // Translate upper-layer protocol data.
-    if (copy_len >= sizeof(icmpv6_header_t) && v4pkt->next_header == IPV4_NEXT_HEADER_ICMP)
+    if (fragment_offset == 0 &&
+        copy_len >= sizeof(icmpv6_header_t) && v4pkt->next_header == IPV4_NEXT_HEADER_ICMP)
     {
         // We are going to copy all of the payload, but this is an ICMP packet,
         // so we should translate it.
@@ -46,9 +75,9 @@ ssize_t v4_to_v6(ipv6_header_t *v6pkt, size_t v6len, const ipv4_header_t *v4pkt,
         printf("  This is an ICMP packet.\n");
 #endif
         int only_header = copy_len != payload_len || copy_len == sizeof(icmpv6_header_t);
-        int ret = v4_to_v6_icmp((icmpv6_header_t *)(v6pkt + 1), v6len - sizeof(ipv6_header_t),
-                                (icmpv4_header_t *)((uint8_t *)v4pkt + v4header_len),
-                                v4len - v4header_len, v6pkt->src_bytes, v6pkt->dst_bytes,
+        int ret = v4_to_v6_icmp((icmpv6_header_t *)v6payload, v6payload_len,
+                                (const icmpv4_header_t *)v4payload, v4payload_len,
+                                v6pkt->src_bytes, v6pkt->dst_bytes,
                                 payload_len, only_header);
         if (ret <= 0) return ret;
         copy_len = ret;
@@ -60,25 +89,25 @@ ssize_t v4_to_v6(ipv6_header_t *v6pkt, size_t v6len, const ipv4_header_t *v4pkt,
         v6pkt->next_header = IPV6_NEXT_HEADER_ICMP;
     }
 #ifdef TRANSLATE_UDP
-    else if (copy_len >= sizeof(udp_header_t) && v4pkt->next_header == IP_NEXT_HEADER_UDP)
+    else if (fragment_offset == 0 &&
+             copy_len >= sizeof(udp_header_t) && v4pkt->next_header == IP_NEXT_HEADER_UDP)
     {
         // Copy the payload.
-        memcpy(v6pkt + 1, (uint8_t *)v4pkt + v4header_len, copy_len);
+        memcpy(v6payload, v4payload, copy_len);
         // Adjust the UDP header.
-        v4_to_v6_udp_header((udp_header_t *)(v6pkt + 1),
-                            (udp_header_t *)((uint8_t *)v4pkt + v4header_len),
+        v4_to_v6_udp_header((udp_header_t *)v6payload, (const udp_header_t *)v4payload,
                             v4pkt->src_bytes, v4pkt->dst_bytes,
                             v6pkt->src_bytes, v6pkt->dst_bytes);
     }
 #endif
 #ifdef TRANSLATE_TCP
-    else if (copy_len >= sizeof(tcp_header_t) && v4pkt->next_header == IP_NEXT_HEADER_TCP)
+    else if (fragment_offset == 0 &&
+             copy_len >= sizeof(tcp_header_t) && v4pkt->next_header == IP_NEXT_HEADER_TCP)
     {
         // Copy the payload.
-        memcpy(v6pkt + 1, (uint8_t *)v4pkt + v4header_len, copy_len);
+        memcpy(v6payload, v4payload, copy_len);
         // Adjust the TCP header.
-        v4_to_v6_tcp_header((tcp_header_t *)(v6pkt + 1),
-                            (tcp_header_t *)((uint8_t *)v4pkt + v4header_len),
+        v4_to_v6_tcp_header((tcp_header_t *)v6payload, (const tcp_header_t *)v4payload,
                             v4pkt->src_bytes, v4pkt->dst_bytes,
                             v6pkt->src_bytes, v6pkt->dst_bytes);
     }
@@ -86,10 +115,10 @@ ssize_t v4_to_v6(ipv6_header_t *v6pkt, size_t v6len, const ipv4_header_t *v4pkt,
     else
     {
         // Just copy the payload.
-        memcpy(v6pkt + 1, (uint8_t *)v4pkt + v4header_len, copy_len);
+        memcpy(v6payload, v4payload, copy_len);
     }
 
-    return sizeof(ipv6_header_t) + copy_len;
+    return sizeof(ipv6_header_t) + fragment_header_len + copy_len;
 }
 
 static inline int v4_to_v6_icmp_type_code(uint16_t type_code)

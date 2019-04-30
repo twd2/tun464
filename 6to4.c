@@ -14,8 +14,22 @@ ssize_t v6_to_v4(ipv4_header_t *v4pkt, size_t v4len, const ipv6_header_t *v6pkt,
     if (v6len < sizeof(ipv6_header_t)) return -5;
     if (v4len < sizeof(ipv4_header_t)) return -6;
     uint16_t payload_len = ntohs(v6pkt->payload_len);
+    int is_fragment = 0;
+    if (v6pkt->next_header == IPV6_NEXT_HEADER_FRAGMENT)
+    {
+         if (v6len < sizeof(ipv6_header_t) + sizeof(ipv6_fragment_header_t)) return -600;
+         payload_len -= sizeof(ipv6_fragment_header_t);
+         is_fragment = 1;
+    }
     if (payload_len < copy_len) copy_len = payload_len;
-    if (v6len < sizeof(ipv6_header_t) + copy_len) return -7;
+    if (is_fragment)
+    {
+        if (v6len < sizeof(ipv6_header_t) + sizeof(ipv6_fragment_header_t) + copy_len) return -71;
+    }
+    else
+    {
+        if (v6len < sizeof(ipv6_header_t) + copy_len) return -72;
+    }
     if (v4len < sizeof(ipv4_header_t) + copy_len) return -8;
     const uint8_t *dst_prefix = local_prefix, *src_prefix = remote_prefix;
     if (reverse)
@@ -25,14 +39,34 @@ ssize_t v6_to_v4(ipv4_header_t *v4pkt, size_t v4len, const ipv6_header_t *v6pkt,
     }
     if (memcmp(v6pkt->dst_bytes, dst_prefix, PREFIX_BYTES) != 0) return -9;
 
-    // Translate the header.
+    const void *v6payload = v6pkt + 1;
+    size_t v6payload_len = v6len - sizeof(ipv6_header_t);
+    void *v4payload = v4pkt + 1;
+    size_t v4payload_len = v4len - sizeof(ipv4_header_t);
+
+    // Check fragmentation.
+    size_t fragment_offset = 0;
+    uint32_t fragment_mf = 0;
+    const ipv6_fragment_header_t *frag_header = (const ipv6_fragment_header_t *)v6payload;
+    if (is_fragment)
+    {
+        is_fragment = 1;
+        fragment_offset = ntohs(frag_header->offset_mf) >> 3;
+        fragment_mf = ntohs(frag_header->offset_mf) & IPV6_MF_BIT;
+        v6payload = frag_header + 1;
+        v6payload_len -= sizeof(ipv6_fragment_header_t);
+    }
+
+    uint8_t next_header = is_fragment ? frag_header->next_header : v6pkt->next_header;
+
+    // Translate the header and handle fragmentation.
     v4pkt->version_header_len = 0x45;
     v4pkt->dscp_ecn = 0;
     v4pkt->total_len = htons(sizeof(ipv4_header_t) + payload_len);
-    v4pkt->id = 0;
-    v4pkt->flags = htons(IPV4_DF_BIT);
+    v4pkt->id = is_fragment ? htons(ntohl(frag_header->id) & 0xffff) : 0;
+    v4pkt->flags = is_fragment ? htons(fragment_offset | (fragment_mf << 13)) : htons(IPV4_DF_BIT);
     v4pkt->hop_limit = v6pkt->hop_limit;
-    v4pkt->next_header = v6pkt->next_header;
+    v4pkt->next_header = next_header;
     v4pkt->checksum = 0;
 
     // Translate addresses.
@@ -43,6 +77,7 @@ ssize_t v6_to_v4(ipv4_header_t *v4pkt, size_t v4len, const ipv6_header_t *v6pkt,
     else
     {
         // Use CGN addresses. FIXME: new translation design needed
+        // TODO: RFC 6791
         v4pkt->src_bytes[0] = 100;
         v4pkt->src_bytes[1] = 0x40 | (v6pkt->src_bytes[7] & 0x3f);
         v4pkt->src_bytes[2] = v6pkt->src_bytes[14];
@@ -51,7 +86,8 @@ ssize_t v6_to_v4(ipv4_header_t *v4pkt, size_t v4len, const ipv6_header_t *v6pkt,
     memcpy(v4pkt->dst_bytes, v6pkt->dst_bytes + PREFIX_BYTES, HOST_BYTES);
 
     // Translate upper-layer protocol data.
-    if (copy_len >= sizeof(icmpv4_header_t) && v6pkt->next_header == IPV6_NEXT_HEADER_ICMP)
+    if (fragment_offset == 0 &&
+        copy_len >= sizeof(icmpv4_header_t) && next_header == IPV6_NEXT_HEADER_ICMP)
     {
         // We are going to copy all of the payload, but this is an ICMP packet,
         // so we should translate it first.
@@ -59,8 +95,8 @@ ssize_t v6_to_v4(ipv4_header_t *v4pkt, size_t v4len, const ipv6_header_t *v6pkt,
         printf("  This is an ICMP packet.\n");
 #endif
         int only_header = copy_len != payload_len;
-        int ret = v6_to_v4_icmp((icmpv4_header_t *)(v4pkt + 1), v4len - sizeof(ipv4_header_t),
-                                (icmpv6_header_t *)(v6pkt + 1), v6len - sizeof(ipv6_header_t),
+        int ret = v6_to_v4_icmp((icmpv4_header_t *)v4payload, v4payload_len,
+                                (const icmpv6_header_t *)v6payload, v6payload_len,
                                 v6pkt->src_bytes, v6pkt->dst_bytes, payload_len, only_header);
         if (ret <= 0) return ret;
         copy_len = ret;
@@ -72,23 +108,25 @@ ssize_t v6_to_v4(ipv4_header_t *v4pkt, size_t v4len, const ipv6_header_t *v6pkt,
         v4pkt->next_header = IPV4_NEXT_HEADER_ICMP;
     }
 #ifdef TRANSLATE_UDP
-    else if (copy_len >= sizeof(udp_header_t) && v6pkt->next_header == IP_NEXT_HEADER_UDP)
+    else if (fragment_offset == 0 &&
+             copy_len >= sizeof(udp_header_t) && next_header == IP_NEXT_HEADER_UDP)
     {
         // Copy the payload.
-        memcpy(v4pkt + 1, v6pkt + 1, copy_len);
+        memcpy(v4payload, v6payload, copy_len);
         // Adjust the UDP header.
-        v6_to_v4_udp_header((udp_header_t *)(v4pkt + 1), (udp_header_t *)(v6pkt + 1),
+        v6_to_v4_udp_header((udp_header_t *)v4payload, (const udp_header_t *)v6payload,
                             v6pkt->src_bytes, v6pkt->dst_bytes,
                             v4pkt->src_bytes, v4pkt->dst_bytes);
     }
 #endif
 #ifdef TRANSLATE_TCP
-    else if (copy_len >= sizeof(tcp_header_t) && v6pkt->next_header == IP_NEXT_HEADER_TCP)
+    else if (fragment_offset == 0 &&
+             copy_len >= sizeof(tcp_header_t) && next_header == IP_NEXT_HEADER_TCP)
     {
         // Copy the payload.
-        memcpy(v4pkt + 1, v6pkt + 1, copy_len);
+        memcpy(v4payload, v6payload, copy_len);
         // Adjust the TCP header.
-        v6_to_v4_tcp_header((tcp_header_t *)(v4pkt + 1), (tcp_header_t *)(v6pkt + 1),
+        v6_to_v4_tcp_header((tcp_header_t *)v4payload, (const tcp_header_t *)v6payload,
                             v6pkt->src_bytes, v6pkt->dst_bytes,
                             v4pkt->src_bytes, v4pkt->dst_bytes);
     }
@@ -96,7 +134,7 @@ ssize_t v6_to_v4(ipv4_header_t *v4pkt, size_t v4len, const ipv6_header_t *v6pkt,
     else
     {
         // Just copy the payload.
-        memcpy(v4pkt + 1, v6pkt + 1, copy_len);
+        memcpy(v4payload, v6payload, copy_len);
     }
 
     // Calculate IPv4 header checksum.
