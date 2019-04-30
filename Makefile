@@ -4,7 +4,7 @@ include config.mk
 all: tun464
 
 tun464: main.o common.o utils.o 4to6.o 6to4.o
-	gcc -O2 -Wall $^ -o $@
+	gcc -O2 -Wall $^ -o $@ -lpthread
 
 %.o: %.c common.h utils.h 4to6.h 6to4.h
 	gcc -O2 -Wall -c $< -o $@
@@ -19,17 +19,21 @@ run2: tun464
 
 .PHONY: setup
 setup:
-	sudo ip addr add 10.2.2.1/32 dev tun464
-	sudo ip link set tun464 up
-	sudo ip route add $(PREFIX_A)/96 dev tun464
-	sudo ip route add 10.2.2.2/32 dev tun464
+	sudo ip addr add 10.2.2.1/32 dev tun464-ipv4
+	sudo ip link set tun464-ipv4 up
+	sudo ip link set tun464-ipv4 mtu 1472
+	sudo ip link set tun464-ipv6 up
+	sudo ip route add $(PREFIX_A)/96 dev tun464-ipv6
+	sudo ip route add 10.2.2.2/32 dev tun464-ipv4
 
 .PHONY: setup2
 setup2:
-	sudo ip addr add 10.2.2.2/32 dev tun464
-	sudo ip link set tun464 up
-	sudo ip route add $(PREFIX_B)/96 dev tun464
-	sudo ip route add 10.2.2.1/32 dev tun464
+	sudo ip addr add 10.2.2.2/32 dev tun464-ipv4
+	sudo ip link set tun464-ipv4 up
+	sudo ip link set tun464-ipv4 mtu 1472
+	sudo ip link set tun464-ipv6 up
+	sudo ip route add $(PREFIX_B)/96 dev tun464-ipv6
+	sudo ip route add 10.2.2.1/32 dev tun464-ipv4
 
 .PHONY: clean
 clean:

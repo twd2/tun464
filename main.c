@@ -2,6 +2,7 @@
 #include <fcntl.h>
 #include <linux/if.h>
 #include <linux/if_tun.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,7 +31,8 @@ int tun_alloc(const char *name, int flags)
     bzero(&ifr, sizeof(ifr));
     if (name)
     {
-        strncpy(ifr.ifr_name, name, IFNAMSIZ);
+        strncpy(ifr.ifr_name, name, IFNAMSIZ - 1);
+        ifr.ifr_name[IFNAMSIZ - 1] = 0;
     }
     ifr.ifr_flags = flags;
 
@@ -59,30 +61,145 @@ void *guarded_malloc(size_t len)
     return ret + PAGE_SIZE;
 }
 
+static int v4tun_fd, v6tun_fd;
+
+static void *v4entry(void *_)
+{
+    char *buffer = guarded_malloc(BUFFER_SIZE), *new_buffer = guarded_malloc(BUFFER_SIZE);
+    while (1)
+    {
+        ssize_t len = read(v4tun_fd, buffer, BUFFER_SIZE);
+        if (len <= 0)
+        {
+            perror("Reading from interface for IPv4");
+            exit(1);
+        }
+
+        int version = get_version(buffer);
+        if (version != 4) continue;
+#ifdef VERBOSE
+        print_ipv4_packet((ipv4_header_t *)buffer);
+#endif
+        ssize_t new_len = v4_to_v6((ipv6_header_t *)new_buffer, BUFFER_SIZE,
+                                   (ipv4_header_t *)buffer, len, -1, 0);
+        if (new_len > 0)
+        {
+#ifdef VERBOSE
+            printf("  translated: ");
+            print_ipv6_packet((ipv6_header_t *)new_buffer);
+#endif
+            ssize_t ret = write(v6tun_fd, new_buffer, new_len);
+            if (ret <= 0)
+            {
+                perror("write");
+            }
+        }
+        else
+        {
+#if defined(VERBOSE) || defined(LOG_ERROR)
+#ifndef VERBOSE
+            print_ipv4_packet((ipv4_header_t *)buffer);
+#endif
+            printf("  translation failed: %ld\n", new_len);
+            print_hex(buffer, len);
+            printf("\n");
+#endif
+        }
+    }
+    return NULL;
+}
+
+static void *v6entry(void *_)
+{
+    char *buffer = guarded_malloc(BUFFER_SIZE), *new_buffer = guarded_malloc(BUFFER_SIZE);
+    while (1)
+    {
+        ssize_t len = read(v6tun_fd, buffer, BUFFER_SIZE);
+        if (len <= 0)
+        {
+            perror("Reading from interface for IPv6");
+            exit(1);
+        }
+
+        int version = get_version(buffer);
+        if (version != 6) continue;
+#ifdef VERBOSE
+        print_ipv6_packet((ipv6_header_t *)buffer);
+#endif
+        ssize_t new_len = v6_to_v4((ipv4_header_t *)new_buffer, BUFFER_SIZE,
+                                   (ipv6_header_t *)buffer, len, -1, 0);
+        if (new_len > 0)
+        {
+#ifdef VERBOSE
+            printf("  translated: ");
+            print_ipv4_packet((ipv4_header_t *)new_buffer);
+#endif
+            ssize_t ret = write(v6tun_fd, new_buffer, new_len);
+            if (ret <= 0)
+            {
+                perror("write");
+            }
+        }
+        else
+        {
+#if defined(VERBOSE) || defined(LOG_ERROR)
+#ifndef VERBOSE
+            print_ipv6_packet((ipv6_header_t *)buffer);
+#endif
+            printf("  translation failed: %ld\n", new_len);
+            print_hex(buffer, len);
+            printf("\n");
+#endif
+        }
+    }
+    return NULL;
+}
+
 int main(int argc, const char **argv)
 {
-    const char *name = "tun464";
     if (argc < 2)
     {
         printf("Usage: %s dev_name [local_prefix remote_prefix]\n", argv[0]);
         return 1;
     }
-    name = argv[1];
+
+    const char *name = argv[1];
+    if (strlen(name) + 5 + 1 > IFNAMSIZ)
+    {
+        printf("dev_name is too long.\n");
+        return 1;
+    }
+    char v4name[IFNAMSIZ], v6name[IFNAMSIZ];
+    strcpy(v4name, name);
+    strcpy(v6name, name);
+    strcat(v4name, "-ipv4");
+    strcat(v6name, "-ipv6");
+    printf("Using %s for IPv4 and %s for IPv6.\n", v4name, v6name);
+
     if (argc >= 4)
     {
         inet_pton(AF_INET6, argv[2], local_prefix);
         inet_pton(AF_INET6, argv[3], remote_prefix);
+        printf("Local prefix: %s\n", argv[2]);
+        printf("Remote prefix: %s\n", argv[3]);
     }
     else
     {
         inet_pton(AF_INET6, LOCAL_PREFIX, local_prefix);
         inet_pton(AF_INET6, REMOTE_PREFIX, remote_prefix);
+        printf("Local prefix: %s\n", LOCAL_PREFIX);
+        printf("Remote prefix: %s\n", REMOTE_PREFIX);
     }
 
-    int tun_fd = tun_alloc(name, IFF_TUN | IFF_NO_PI);
-    if (tun_fd < 0)
+    if ((v4tun_fd = tun_alloc(v4name, IFF_TUN | IFF_NO_PI)) < 0)
     {
-        perror("Allocating interface");
+        perror("Allocating interface for IPv4");
+        exit(1);
+    }
+
+    if ((v6tun_fd = tun_alloc(v6name, IFF_TUN | IFF_NO_PI)) < 0)
+    {
+        perror("Allocating interface for IPv6");
         exit(1);
     }
 
@@ -91,80 +208,11 @@ int main(int argc, const char **argv)
     seteuid(65534);
     setegid(65534);
 
-    char *buffer = guarded_malloc(BUFFER_SIZE), *new_buffer = guarded_malloc(BUFFER_SIZE);
-    while (1)
-    {
-        ssize_t len = read(tun_fd, buffer, BUFFER_SIZE);
-        if (len <= 0)
-        {
-            perror("Reading from interface");
-            close(tun_fd);
-            exit(1);
-        }
+    pthread_t v4thread, v6thread;
+    pthread_create(&v4thread, NULL, v4entry, NULL);
+    pthread_create(&v6thread, NULL, v6entry, NULL);
+    pthread_join(v4thread, NULL);
+    pthread_join(v6thread, NULL);
 
-        int version = get_version(buffer);
-        if (version == 4)
-        {
-#ifdef VERBOSE
-            print_ipv4_packet((ipv4_header_t *)buffer);
-#endif
-            ssize_t new_len = v4_to_v6((ipv6_header_t *)new_buffer, BUFFER_SIZE,
-                                       (ipv4_header_t *)buffer, len, -1, 0);
-            if (new_len > 0)
-            {
-#ifdef VERBOSE
-                printf("  translated: ");
-                print_ipv6_packet((ipv6_header_t *)new_buffer);
-#endif
-                ssize_t ret = write(tun_fd, new_buffer, new_len);
-                if (ret <= 0)
-                {
-                    perror("write");
-                }
-            }
-            else
-            {
-#if defined(VERBOSE) || defined(LOG_ERROR)
-#ifndef VERBOSE
-                print_ipv4_packet((ipv4_header_t *)buffer);
-#endif
-                printf("  translation failed: %ld\n", new_len);
-                print_hex(buffer, len);
-                printf("\n");
-#endif
-            }
-        }
-        if (version == 6)
-        {
-#ifdef VERBOSE
-            print_ipv6_packet((ipv6_header_t *)buffer);
-#endif
-            ssize_t new_len = v6_to_v4((ipv4_header_t *)new_buffer, BUFFER_SIZE,
-                                       (ipv6_header_t *)buffer, len, -1, 0);
-            if (new_len > 0)
-            {
-#ifdef VERBOSE
-                printf("  translated: ");
-                print_ipv4_packet((ipv4_header_t *)new_buffer);
-#endif
-                ssize_t ret = write(tun_fd, new_buffer, new_len);
-                if (ret <= 0)
-                {
-                    perror("write");
-                }
-            }
-            else
-            {
-#if defined(VERBOSE) || defined(LOG_ERROR)
-#ifndef VERBOSE
-                print_ipv6_packet((ipv6_header_t *)buffer);
-#endif
-                printf("  translation failed: %ld\n", new_len);
-                print_hex(buffer, len);
-                printf("\n");
-#endif
-            }
-        }
-    }
     return 0;
 }
