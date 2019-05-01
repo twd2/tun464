@@ -1,2 +1,3 @@
 PREFIX_A=2001:db8:1:4646::
 PREFIX_B=2001:db8:2:4646::
+IPV4_MTU=1472  # TODO: if it is a PPPoE network, change this to 1464

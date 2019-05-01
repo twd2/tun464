@@ -21,7 +21,7 @@ run2: tun464
 setup:
 	sudo ip addr add 10.2.2.1/32 dev tun464-ipv4
 	sudo ip link set tun464-ipv4 up
-	sudo ip link set tun464-ipv4 mtu 1472  # TODO: if it is a PPPoE network, change this to 1464
+	sudo ip link set tun464-ipv4 mtu $(IPV4_MTU)
 	sudo ip link set tun464-ipv6 up
 	sudo ip route add $(PREFIX_A)/96 dev tun464-ipv6
 	sudo ip route add 10.2.2.2/32 dev tun464-ipv4
@@ -30,7 +30,7 @@ setup:
 setup2:
 	sudo ip addr add 10.2.2.2/32 dev tun464-ipv4
 	sudo ip link set tun464-ipv4 up
-	sudo ip link set tun464-ipv4 mtu 1472  # TODO: ditto
+	sudo ip link set tun464-ipv4 mtu $(IPV4_MTU)
 	sudo ip link set tun464-ipv6 up
 	sudo ip route add $(PREFIX_B)/96 dev tun464-ipv6
 	sudo ip route add 10.2.2.1/32 dev tun464-ipv4
