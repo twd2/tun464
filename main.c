@@ -134,7 +134,7 @@ static void *v6entry(void *_)
             printf("  translated: ");
             print_ipv4_packet((ipv4_header_t *)new_buffer);
 #endif
-            ssize_t ret = write(v6tun_fd, new_buffer, new_len);
+            ssize_t ret = write(v4tun_fd, new_buffer, new_len);
             if (ret <= 0)
             {
                 perror("write");
