@@ -1,6 +1,6 @@
 # tun464
 
-This is a lightweight tunnel (or so-called translator) to transit IPv4 packets over an IPv6 network.
+This is a lightweight tunnel (or so-called translator) to transit IPv4 packets over an IPv6 network or the IPv6 internet.
 
 Not like ipip6 or other tunnels, it minimizes the MTU overhead by embedding IPv4 addresses into IPv6 addresses. It can reach 1472 (1500 - 40 - 8 + 20) of MTU, while ipip6 would usually decrease MTU to 1452 (1500 - 40 - 8).
 
